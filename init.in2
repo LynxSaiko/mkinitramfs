@@ -1,0 +1,418 @@
+#!/bin/sh
+
+PATH=/usr/bin:/usr/sbin
+export PATH
+
+problem()
+{
+   printf "\n\nEncountered a problem!\n"
+   printf "Dropping you to a shell.\n\n"
+   printf "Available devices:\n"
+   ls -la /dev/sd* /dev/vd* /dev/xvd* /dev/nvme* /dev/sr* 2>/dev/null || true
+   printf "\nMount points:\n"
+   mount | grep -v "tmpfs\|proc\|sysfs\|devpts" || true
+   printf "\n"
+   sh
+}
+
+no_device()
+{
+   printf "The device %s, which is supposed to contain the\n" $1
+   printf "root file system, does not exist.\n"
+   printf "Please fix this problem and exit this shell.\n\n"
+}
+
+no_mount()
+{
+   printf "Could not mount device %s\n" $1
+   printf "Sleeping forever. Please reboot and fix the kernel command line.\n\n"
+   printf "Maybe the device is formatted with an unsupported file system?\n\n"
+   printf "Or maybe filesystem type autodetection went wrong, in which case\n"
+   printf "you should add the rootfstype=... parameter to the kernel command line.\n\n"
+   printf "Available partitions:\n"
+}
+
+# Fungsi untuk mount squashfs
+mount_squashfs()
+{
+    local squashfs_file="$1"
+    echo "Mounting squashfs: $squashfs_file"
+    
+    mkdir -p /.root
+    if mount -t squashfs -o loop "$squashfs_file" /.root 2>/dev/null; then
+        echo "✓ Successfully mounted squashfs"
+        return 0
+    else
+        echo "✗ Failed to mount squashfs"
+        return 1
+    fi
+}
+
+# Fungsi untuk mencari rootfs.squashfs di berbagai lokasi - DIPERBAIKI UNTUK LEAKOS
+find_rootfs_squashfs()
+{
+    printf "\n=== Searching for rootfs.squashfs ===\n"
+    
+    # Buat directory untuk mencoba mount
+    mkdir -p /mnt/try
+    
+    # Prioritaskan CD-ROM/ISO terlebih dahulu (untuk Leakos ISO)
+    echo "Checking CD-ROM/ISO devices first..."
+    for cdrom in /dev/sr0 /dev/cdrom; do
+        if [ -b "$cdrom" ]; then
+            echo "Trying CD-ROM: $cdrom"
+            
+            # Coba mount sebagai ISO
+            for fs_type in iso9660 udf; do
+                if mount -n -t $fs_type -o ro "$cdrom" /mnt/try 2>/dev/null; then
+                    echo "✓ Mounted $cdrom as $fs_type"
+                    
+                    # --- LOKASI KHUSUS UNTUK LEAKOS ---
+                    # 1. Struktur Leakos: /boot/sources/rootfs.squashfs
+                    if [ -f "/mnt/try/boot/sources/rootfs.squashfs" ]; then
+                        echo "✓ Found Leakos structure: /boot/sources/rootfs.squashfs"
+                        mount_squashfs "/mnt/try/boot/sources/rootfs.squashfs"
+                        local result=$?
+                        umount /mnt/try 2>/dev/null
+                        rm -rf /mnt/try
+                        return $result
+                    fi
+                    
+                    # 2. Cek lokasi standar juga
+                    locations="/sources/ /live/ /casper/ / /boot/ /Leakos/"
+                    
+                    for location in $locations; do
+                        # Coba rootfs.squashfs
+                        squashfs_path="/mnt/try${location}rootfs.squashfs"
+                        if [ -f "$squashfs_path" ]; then
+                            echo "✓ Found: $squashfs_path"
+                            mount_squashfs "$squashfs_path"
+                            result=$?
+                            umount /mnt/try 2>/dev/null
+                            rm -rf /mnt/try
+                            return $result
+                        fi
+                        
+                        # Coba nama file alternatif
+                        for alt_name in filesystem.squashfs system.squashfs root.squashfs live.squashfs; do
+                            alt_path="/mnt/try${location}${alt_name}"
+                            if [ -f "$alt_path" ]; then
+                                echo "✓ Found (alternate): $alt_path"
+                                mount_squashfs "$alt_path"
+                                result=$?
+                                umount /mnt/try 2>/dev/null
+                                rm -rf /mnt/try
+                                return $result
+                            fi
+                        done
+                    done
+                    
+                    # Cari di mana saja di dalam ISO
+                    echo "Searching recursively in ISO..."
+                    found_squashfs=$(find /mnt/try -type f -name "*.squashfs" 2>/dev/null | head -1)
+                    if [ -n "$found_squashfs" ]; then
+                        echo "✓ Found squashfs: $found_squashfs"
+                        mount_squashfs "$found_squashfs"
+                        result=$?
+                        umount /mnt/try 2>/dev/null
+                        rm -rf /mnt/try
+                        return $result
+                    fi
+                    
+                    umount /mnt/try 2>/dev/null
+                    break
+                fi
+            done
+        fi
+    done
+    
+    # Jika bukan CD-ROM, coba device block lainnya
+    echo "Checking other block devices..."
+    devices=""
+    for pattern in /dev/sd* /dev/vd* /dev/xvd* /dev/nvme* /dev/mmcblk*; do
+        [ -b "$pattern" ] && devices="$devices $pattern"
+    done
+    
+    if [ -z "$devices" ]; then
+        echo "No block devices found!"
+        rm -rf /mnt/try
+        return 1
+    fi
+    
+    echo "Checking devices: $devices"
+    
+    for dev in $devices; do
+        printf "\nTrying device: %s\n" "$dev"
+        
+        # Coba mount device dengan berbagai filesystem
+        for fs_type in ext4 ext3 ext2 vfat ntfs btrfs xfs; do
+            if mount -n -t $fs_type -o ro "$dev" /mnt/try 2>/dev/null; then
+                echo "✓ Mounted $dev as $fs_type"
+                
+                # Lokasi-lokasi yang mungkin berisi rootfs.squashfs
+                # PRIORITAS: Leakos structure di USB
+                locations="/boot/sources/ /sources/ /live/ /casper/ /"
+                
+                for location in $locations; do
+                    squashfs_path="/mnt/try${location}rootfs.squashfs"
+                    if [ -f "$squashfs_path" ]; then
+                        echo "✓ Found: $squashfs_path"
+                        mount_squashfs "$squashfs_path"
+                        local result=$?
+                        umount /mnt/try 2>/dev/null
+                        rm -rf /mnt/try
+                        return $result
+                    fi
+                    
+                    # Coba nama file alternatif
+                    for alt_name in filesystem.squashfs system.squashfs root.squashfs live.squashfs; do
+                        alt_path="/mnt/try${location}${alt_name}"
+                        if [ -f "$alt_path" ]; then
+                            echo "✓ Found (alternate): $alt_path"
+                            mount_squashfs "$alt_path"
+                            result=$?
+                            umount /mnt/try 2>/dev/null
+                            rm -rf /mnt/try
+                            return $result
+                        fi
+                    done
+                done
+                
+                # Cari file squashfs di mana saja
+                echo "Searching for any squashfs files..."
+                find_result=$(find /mnt/try -name "*.squashfs" -type f 2>/dev/null | head -3)
+                if [ -n "$find_result" ]; then
+                    echo "Found squashfs files:"
+                    echo "$find_result"
+                    for squashfs in $find_result; do
+                        echo "Trying: $squashfs"
+                        if mount_squashfs "$squashfs"; then
+                            umount /mnt/try 2>/dev/null
+                            rm -rf /mnt/try
+                            return 0
+                        fi
+                    done
+                fi
+                
+                umount /mnt/try 2>/dev/null
+                break  # Coba filesystem type berikutnya
+            fi
+        done
+    done
+    
+    rm -rf /mnt/try
+    echo "✗ ERROR: Could not find rootfs.squashfs on any device!"
+    
+    # Debug info
+    echo -e "\n=== DEBUG INFO ==="
+    echo "Mounted filesystems:"
+    mount | grep -v tmpfs || true
+    echo -e "\nBlock devices:"
+    ls -la /dev/sd* /dev/vd* /dev/sr* 2>/dev/null || true
+    echo -e "\nDisk by-id:"
+    ls -la /dev/disk/by-id/ 2>/dev/null || true
+    echo "==================="
+    
+    return 1
+}
+
+do_mount_root()
+{
+   mkdir -p /.root
+   [ -n "$rootflags" ] && rootflags="$rootflags,"
+   rootflags="$rootflags$ro"
+
+   case "$root" in
+      /dev/*    ) device=$root ;;
+      UUID=*    ) eval $root; device="/dev/disk/by-uuid/$UUID" ;;
+      PARTUUID=*) eval $root; device="/dev/disk/by-partuuid/$PARTUUID" ;;
+      LABEL=*   ) eval $root; device="/dev/disk/by-label/$LABEL" ;;
+      "AUTO"    ) device="auto" ;;
+      "LEAKOS"  ) device="leakos" ;;  # Mode khusus Leakos
+      ""        ) device="auto" ;;
+   esac
+
+   # Mode khusus Leakos (CD-ROM dengan struktur /boot/sources/)
+   if [ "$device" = "leakos" ]; then
+       echo "Leakos mode: Looking for CD-ROM with Leakos structure..."
+       if [ -b /dev/sr0 ] || [ -b /dev/cdrom ]; then
+           echo "Found CD-ROM device"
+           if find_rootfs_squashfs; then
+               echo "Leakos rootfs found!"
+               return 0
+           fi
+       fi
+       echo "Leakos mode failed, falling back to auto..."
+       device="auto"
+   fi
+
+   # Jika device adalah "auto", cari rootfs.squashfs
+   if [ "$device" = "auto" ]; then
+       echo "Auto-detecting root filesystem..."
+       if find_rootfs_squashfs; then
+           echo "✓ Auto-detection successful!"
+           return 0
+       else
+           echo "✗ Auto-detection failed!"
+           problem
+       fi
+   fi
+
+   # Mount device biasa (bukan squashfs)
+   while [ ! -b "$device" ] ; do
+       no_device $device
+       problem
+   done
+
+   echo "Mounting $device as root..."
+   if ! mount -n -t "$rootfstype" -o "$rootflags" "$device" /.root ; then
+       no_mount $device
+       cat /proc/partitions
+       problem
+   else
+       echo "✓ Successfully mounted device $device"
+   fi
+}
+
+do_try_resume()
+{
+   case "$resume" in
+      UUID=* ) eval $resume; resume="/dev/disk/by-uuid/$UUID"  ;;
+      LABEL=*) eval $resume; resume="/dev/disk/by-label/$LABEL" ;;
+   esac
+
+   if $noresume || ! [ -b "$resume" ]; then return; fi
+
+   ls -lH "$resume" | ( read x x x x maj min x
+       echo -n ${maj%,}:$min > /sys/power/resume )
+}
+
+init=/sbin/init
+root=
+rootdelay=
+rootfstype=auto
+ro="ro"
+rootflags=
+device=
+resume=
+noresume=false
+
+echo "=== Initializing initramfs ==="
+echo "Mounting essential filesystems..."
+
+# Mount filesystem dasar
+mount -n -t devtmpfs devtmpfs /dev 2>/dev/null || {
+    echo "Creating /dev manually..."
+    mkdir -p /dev
+    mknod -m 622 /dev/console c 5 1
+    mknod -m 666 /dev/null c 1 3
+    mknod -m 666 /dev/zero c 1 5
+    mknod -m 666 /dev/random c 1 8
+    mknod -m 666 /dev/urandom c 1 9
+    mknod -m 666 /dev/tty c 5 0
+    mknod -m 666 /dev/loop0 b 7 0
+}
+mount -n -t proc     proc     /proc
+mount -n -t sysfs    sysfs    /sys
+mount -n -t tmpfs    tmpfs    /run
+
+# Buat directory penting
+mkdir -p /dev/pts /dev/shm /mnt /media /proc /sys /run /boot
+
+read -r cmdline < /proc/cmdline
+echo "Kernel command line: $cmdline"
+
+# Parse kernel parameters
+for param in $cmdline ; do
+  case $param in
+    init=*      ) init=${param#init=}             ;;
+    root=*      ) root=${param#root=}             ;;
+    rootdelay=* ) rootdelay=${param#rootdelay=}   ;;
+    rootfstype=*) rootfstype=${param#rootfstype=} ;;
+    rootflags=* ) rootflags=${param#rootflags=}   ;;
+    resume=*    ) resume=${param#resume=}         ;;
+    noresume    ) noresume=true                   ;;
+    ro          ) ro="ro"                         ;;
+    rw          ) ro="rw"                         ;;
+    quiet       ) quiet=1                         ;;
+    debug       ) set -x                          ;;
+    leakos      ) root="LEAKOS"                   ;;  # Mode Leakos
+  esac
+done
+
+# Jika root belum ditentukan, default ke AUTO
+[ -z "$root" ] && root="AUTO"
+
+echo "Root parameter: $root"
+echo "Root filesystem type: $rootfstype"
+
+# Initialize udev (jika ada)
+echo "Starting udev..."
+if [ -x /sbin/udevd ]; then
+  UDEVD=/sbin/udevd
+elif [ -x /lib/udev/udevd ]; then
+  UDEVD=/lib/udev/udevd
+elif [ -x /lib/systemd/systemd-udevd ]; then
+  UDEVD=/lib/systemd/systemd-udevd
+else
+  echo "Cannot find udevd, continuing without it"
+  UDEVD=
+fi
+
+if [ -n "$UDEVD" ]; then
+  $UDEVD --daemon --resolve-names=never
+  udevadm trigger --action=add
+  udevadm settle --timeout=10
+  echo "Udev started"
+fi
+
+# Initialize device mapper (LVM) jika ada
+if [ -x /sbin/vgchange ] && [ -d /dev/mapper ]; then
+  echo "Activating LVM volumes..."
+  /sbin/vgchange -a y >/dev/null 2>&1 && echo "LVM activated"
+fi
+
+# Initialize software RAID jika ada
+if [ -f /etc/mdadm.conf ] && [ -x /sbin/mdadm ]; then
+  echo "Assembling RAID arrays..."
+  /sbin/mdadm -As >/dev/null 2>&1 && echo "RAID assembled"
+fi
+
+# Wait jika ada delay
+if [ -n "$rootdelay" ] ; then
+  echo "Waiting $rootdelay seconds..."
+  sleep "$rootdelay"
+fi
+
+# Try resume from hibernation
+do_try_resume
+
+# Mount root filesystem
+echo "Mounting root filesystem..."
+do_mount_root
+
+# Clean up udev
+if [ -n "$UDEVD" ]; then
+  echo "Stopping udev..."
+  udevadm control --exit 2>/dev/null || true
+  killall -w ${UDEVD##*/} 2>/dev/null || true
+fi
+
+# Switch to the real root
+echo "Switching to real root filesystem..."
+if [ -x /.root/sbin/init ]; then
+    init="/.root/sbin/init"
+elif [ -x /.root/init ]; then
+    init="/.root/init"
+elif [ -x /.root/bin/init ]; then
+    init="/.root/bin/init"
+fi
+
+echo "Executing: exec switch_root /.root \"$init\" \"$@\""
+exec switch_root /.root "$init" "$@"
+
+# Jika switch_root gagal
+echo "ERROR: switch_root failed!"
+echo "Contents of /.root:"
+ls -la /.root/ 2>/dev/null || echo "Cannot list /.root"
+problem
