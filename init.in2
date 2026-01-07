@@ -129,7 +129,7 @@ find_rootfs_squashfs()
     # Jika bukan CD-ROM, coba device block lainnya
     echo "Checking other block devices..."
     devices=""
-    for pattern in /dev/sd* /dev/vd* /dev/xvd* /dev/nvme* /dev/mmcblk*; do
+    for pattern in /dev/sda1 /dev/sda2 /dev/sdb1 /dev/sdb2 /dev/vd* /dev/xvd* /dev/nvme* /dev/mmcblk*; do
         [ -b "$pattern" ] && devices="$devices $pattern"
     done
     
