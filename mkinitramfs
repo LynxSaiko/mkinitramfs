@@ -68,7 +68,7 @@ WDIR=$(mktemp -d /tmp/initrd-work.XXXXXXXXXX)
 # Create base directory structure
 mkdir -p $WDIR/{dev,run,sys,proc,usr/{bin,lib/{firmware,modules},sbin}}
 mkdir -p $WDIR/etc/{modprobe.d,udev/rules.d}
-mkdir -p $WDIR/{mnt,media}  # Untuk mount point USB
+mkdir -p $WDIR/{mnt,media,sources}  # Untuk mount point USB
 
 touch $WDIR/etc/modprobe.d/modprobe.conf
 ln -s usr/bin  $WDIR/bin
